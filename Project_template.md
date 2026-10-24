@@ -2,10 +2,31 @@
 
 ## Задание 1
 
-1. Спроектируйте to be архитектуру КиноБездны, разделив всю систему на отдельные домены и организовав интеграционное взаимодействие и единую точку вызова сервисов.
-Результат представьте в виде контейнерной диаграммы в нотации С4.
-Добавьте ссылку на файл в этот шаблон
-[ссылка на файл](ссылка)
+1. 
+[Контейнерная диаграмма C4, To-Be (PlantUML)](docs/c4/cinemaabyss-to-be-containers.puml)
+
+![Контейнерная диаграмма To-Be](docs/c4/cinemaabyss-to-be-containers.png)
+
+Целевая система разделена на домены со своими данными. Снаружи доступна только одна точка вызова.
+
+Домены:
+
+- **Movies** — каталог, метаданные, жанры и рейтинги. Сервис уже выделен из монолита.
+- **Users** — регистрация и профили.
+- **Payments** — проведение и статус оплаты.
+- **Subscriptions** — план, срок и продление подписки.
+- **Events** — интеграционный сервис: принимает события Movie, User и Payment, публикует их в Kafka и сам читает топики.
+
+Единая точка вызова — **API Gateway (Proxy)** на порту 8000. Зритель обращается только к нему, шлюз маршрутизирует `/api/movies`, `/api/users`, `/api/payments`, `/api/subscriptions` и `/api/events` в соответствующий домен. Пока идёт выделение сервисов, шлюз работает по паттерну Strangler Fig: фиче-флаг `GRADUAL_MIGRATION` и процент `MOVIES_MIGRATION_PERCENT` постепенно переносят трафик фильмов с монолита на Movies. В целевой схеме монолита нет.
+
+Интеграция:
+
+- синхронные запросы идут только через API Gateway;
+- изменения доменов публикуются в Kafka (`movie-events`, `user-events`, `payment-events`);
+- Events читает все три топика и обрабатывает сообщения;
+- Subscriptions читает `payment-events` и продлевает подписку без прямого вызова Payments.
+
+У каждого бизнес-домена своя база PostgreSQL. Общей базы и прямых вызовов между доменами в обход шлюза и Kafka нет.
 
 
 ## Задание 2
@@ -58,6 +79,26 @@
 
 Необходимые тесты для проверки этого API вызываются при запуске npm run test:local из папки tests/postman 
 Приложите скриншот тестов и скриншот состояния топиков Kafka http://localhost:8090 
+
+### Результат
+
+Прокси и events написаны на Node.js.
+
+- `src/microservices/proxy` — API Gateway. Пока `GRADUAL_MIGRATION=true`, доля `MOVIES_MIGRATION_PERCENT` запросов `/api/movies` уходит в movies, остальные в монолит. Если флаг выключен, фильмы уходят в movies целиком. Users, payments и subscriptions идут в монолит. Заголовок ответа `X-Upstream` показывает, какой сервис ответил.
+- `src/microservices/events` — producer и три consumer'а на топики `movie-events`, `user-events`, `payment-events`. `POST /api/events/movie|user|payment` публикует событие и возвращает `status: success`. Тот же сервис читает сообщение и пишет обработку в лог.
+- Сервис events в `docker-compose.yml` уже был описан, отдельно добавлять его не пришлось. Монолит и movies теперь стартуют после healthy Postgres.
+
+Проверка процента миграции, 20 запросов `GET /api/movies`:
+
+- `MOVIES_MIGRATION_PERCENT=0` — 20 ответов от монолита
+- `MOVIES_MIGRATION_PERCENT=100` — 20 ответов от movies-service
+- `MOVIES_MIGRATION_PERCENT=50` — 11 от movies-service и 9 от монолита
+
+`npm run test:local`: 22 запроса, 42 проверки, 0 падений.
+
+![Postman-тесты](docs/assignment-2/postman-tests.png)
+
+![Топики Kafka](docs/assignment-2/kafka-topics.png)
 
 
 ## Задание 3
@@ -273,6 +314,25 @@ cat .docker/config.json | base64
 
 #### Шаг 3
 Добавьте сюда скриншота вывода при вызове https://cinemaabyss.example.com/api/movies и  скриншот вывода event-service после вызова тестов.
+
+### Результат
+
+CI собирает четыре образа и пушит их в GHCR. В `.github/workflows/docker-build-push.yml` ветка `cinema` добавлена в `push`, имена репозиториев приводятся к нижнему регистру, а после monolith и movies собираются `events-service` и `proxy-service`. `api-tests.yml` тоже запускается на `cinema`: `docker compose up -d --build` ждёт health монолита, movies, events и proxy, затем Newman гоняет коллекцию в сети `cinemaabyss-network`.
+
+В Kubernetes у proxy и events есть Deployment и Service. Ingress `cinemaabyss.example.com` отправляет `/api/events` в events-service:8082, остальной трафик — в proxy-service:8000. Образы: `ghcr.io/aleksfdk/architecture-pro-cinemaabyss/{monolith,movies-service,events-service,proxy-service}:latest`.
+
+Проверка `MOVIES_MIGRATION_PERCENT` в `src/kubernetes/configmap.yaml` при `GRADUAL_MIGRATION=true`, заголовок `X-Upstream`:
+
+- `0` — все ответы `GET /api/movies` приходят от монолита
+- `100` — все ответы приходят от movies-service
+
+В configmap оставлено значение `100`. Вызов `http://cinemaabyss.example.com/api/movies` возвращает список фильмов и заголовок `x-upstream: movies-service`.
+
+`npm run test:kubernetes`: 22 запроса, 42 проверки, 0 падений. Health-check монолита, movies, events и proxy тоже зелёные: ingress и proxy доводят `/health`, `/api/movies/health` и `/api/events/health` до нужных сервисов. В логе events-service видны `produced` и `consumed` для movie, user и payment.
+
+![Список фильмов](docs/assignment-3/movies.png)
+
+![Логи events-service](docs/assignment-3/events-logs.png)
 
 
 ## Задание 4

@@ -1,0 +1,58 @@
+@startuml cinemaabyss-to-be-containers
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_TOP_DOWN()
+LAYOUT_WITH_LEGEND()
+
+title Контейнерная диаграмма To-Be системы «Кинобездна»
+
+Person(viewer, "Зритель", "Смотрит фильмы, оформляет подписку и оплачивает её")
+
+System_Boundary(cinema, "Кинобездна") {
+    Container(gateway, "API Gateway", "Proxy, HTTP :8000", "Единая точка вызова. Strangler Fig: GRADUAL_MIGRATION и MOVIES_MIGRATION_PERCENT")
+
+    Container(movies, "Movies", "HTTP :8081", "Домен фильмов: каталог, жанры, рейтинги")
+    Container(users, "Users", "HTTP", "Домен пользователей: регистрация и профили")
+    Container(payments, "Payments", "HTTP", "Домен платежей")
+    Container(subscriptions, "Subscriptions", "HTTP", "Домен подписок")
+    Container(events, "Events", "HTTP :8082", "Принимает события Movie, User и Payment, пишет и читает Kafka, обрабатывает в лог")
+
+    ContainerDb(moviesdb, "Movies DB", "PostgreSQL", "Данные каталога")
+    ContainerDb(usersdb, "Users DB", "PostgreSQL", "Учётные записи")
+    ContainerDb(paymentsdb, "Payments DB", "PostgreSQL", "Платежи")
+    ContainerDb(subscriptionsdb, "Subscriptions DB", "PostgreSQL", "Планы и сроки")
+
+    ContainerQueue(kafka, "Kafka", "Apache Kafka", "Топики movie-events, user-events, payment-events")
+}
+
+Rel(viewer, gateway, "Вызывает API", "HTTPS")
+
+Rel_D(gateway, movies, "Маршрутизирует", "/api/movies")
+Rel_D(gateway, users, "Маршрутизирует", "/api/users")
+Rel_D(gateway, payments, "Маршрутизирует", "/api/payments")
+Rel_D(gateway, subscriptions, "Маршрутизирует", "/api/subscriptions")
+Rel_D(gateway, events, "Маршрутизирует", "/api/events")
+
+Rel_D(movies, moviesdb, "Читает и пишет", "SQL")
+Rel_D(users, usersdb, "Читает и пишет", "SQL")
+Rel_D(payments, paymentsdb, "Читает и пишет", "SQL")
+Rel_D(subscriptions, subscriptionsdb, "Читает и пишет", "SQL")
+
+Rel_D(movies, kafka, "Публикует", "movie-events")
+Rel_D(users, kafka, "Публикует", "user-events")
+Rel_D(payments, kafka, "Публикует", "payment-events")
+Rel_D(events, kafka, "Публикует и читает", "доменные топики")
+Rel_U(subscriptions, kafka, "Читает", "payment-events")
+
+Lay_D(viewer, gateway)
+Lay_R(movies, users)
+Lay_R(users, payments)
+Lay_R(payments, subscriptions)
+Lay_R(subscriptions, events)
+Lay_D(movies, moviesdb)
+Lay_D(users, usersdb)
+Lay_D(payments, paymentsdb)
+Lay_D(subscriptions, subscriptionsdb)
+Lay_D(events, kafka)
+
+@enduml

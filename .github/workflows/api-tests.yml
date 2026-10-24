@@ -2,9 +2,9 @@ name: API Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, cinema ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, cinema ]
   workflow_dispatch:
     inputs:
       environment:
@@ -35,10 +35,24 @@ jobs:
       
       - name: Start services with Docker Compose
         run: |
-          docker compose up -d
-          # Wait for services to be ready
+          docker compose up -d --build
           echo "Waiting for services to be ready..."
-          sleep 120
+          for i in $(seq 1 60); do
+            ok=0
+            curl -fsS http://127.0.0.1:8080/health >/dev/null && ok=$((ok+1)) || true
+            curl -fsS http://127.0.0.1:8081/api/movies/health >/dev/null && ok=$((ok+1)) || true
+            curl -fsS http://127.0.0.1:8082/api/events/health >/dev/null && ok=$((ok+1)) || true
+            curl -fsS http://127.0.0.1:8000/health >/dev/null && ok=$((ok+1)) || true
+            if [ "$ok" -eq 4 ]; then
+              echo "All services are ready"
+              exit 0
+            fi
+            echo "ready ${ok}/4, attempt ${i}"
+            sleep 5
+          done
+          docker compose ps
+          docker compose logs --tail 80
+          exit 1
       
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -54,15 +68,8 @@ jobs:
       - name: Run API tests
         working-directory: tests/postman
         run: |
-
-          docker compose up -d
-          # Wait for services to be ready
-          echo "Waiting for services to be ready..."
-          sleep 15
-          # Build the Docker image
+          mkdir -p reports
           docker build -t cinemaabyss-api-tests .
-          
-          # Run the tests in Docker
           docker run --network=cinemaabyss-network -v "$(pwd)/reports:/app/reports" cinemaabyss-api-tests
         
       
