@@ -68,6 +68,8 @@ spec:
   selector:
     app: movies-service
   ports:
-  - port: 8081
+  - name: http
+    appProtocol: http
+    port: 8081
     targetPort: 8081
   type: ClusterIP

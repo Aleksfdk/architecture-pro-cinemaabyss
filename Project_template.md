@@ -493,6 +493,23 @@ You can see 21 for the upstream_rq_pending_overflow value which means 21 calls s
 
 Приложите скриншот работы circuit breaker'а
 
+### Результат
+
+Istio 1.31.3 поставлен из локальных чартов релиза: публичный Helm-репозиторий `istio-release.storage.googleapis.com` ответил 403. В кластере работают `istio-base`, `istiod` и gateway. Namespace `cinemaabyss` помечен `istio-injection=enabled`, у monolith, movies, proxy и Fortio по два контейнера.
+
+Circuit breaker — два `DestinationRule` в `src/kubernetes/circuit-breaker-config.yaml`, для `movies-service` и `monolith`. Пул соединений: `maxConnections: 1`, `http1MaxPendingRequests: 1`, `maxRequestsPerConnection: 1`. Порты этих Service названы `http`, иначе Envoy считает 8081 обычным TCP и не применяет HTTP-лимит.
+
+Fortio, 50 потоков и 500 вызовов `http://movies-service:8081/api/movies`:
+
+- `200` — 8 (1.6%)
+- `503` — 492 (98.4%)
+- `upstream_rq_pending_overflow: 492` — столько запросов Envoy отклонил, не дожидаясь свободного слота
+- `upstream_rq_pending_total: 8` — столько запросов всё же ушло в movies
+
+Тот же лимит на монолите, 200 вызовов `http://monolith:8080/api/movies`: 2 ответа `200`, 198 ответов `503`, `upstream_rq_pending_overflow: 141`.
+
+![Circuit breaker](docs/assignment-5/circuit-breaker.png)
+
 Удаляем все
 ```bash
 istioctl uninstall --purge

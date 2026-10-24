@@ -68,6 +68,8 @@ spec:
   selector:
     app: monolith
   ports:
-  - port: 8080
+  - name: http
+    appProtocol: http
+    port: 8080
     targetPort: 8080
   type: ClusterIP
