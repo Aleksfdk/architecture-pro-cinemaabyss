@@ -2,10 +2,31 @@
 
 ## Задание 1
 
-1. Спроектируйте to be архитектуру КиноБездны, разделив всю систему на отдельные домены и организовав интеграционное взаимодействие и единую точку вызова сервисов.
-Результат представьте в виде контейнерной диаграммы в нотации С4.
-Добавьте ссылку на файл в этот шаблон
-[ссылка на файл](ссылка)
+1. 
+[Контейнерная диаграмма C4, To-Be (PlantUML)](docs/c4/cinemaabyss-to-be-containers.puml)
+
+![Контейнерная диаграмма To-Be](docs/c4/cinemaabyss-to-be-containers.png)
+
+Целевая система разделена на домены со своими данными. Снаружи доступна только одна точка вызова.
+
+Домены:
+
+- **Movies** — каталог, метаданные, жанры и рейтинги. Сервис уже выделен из монолита.
+- **Users** — регистрация и профили.
+- **Payments** — проведение и статус оплаты.
+- **Subscriptions** — план, срок и продление подписки.
+- **Events** — интеграционный сервис: принимает события Movie, User и Payment, публикует их в Kafka и сам читает топики.
+
+Единая точка вызова — **API Gateway (Proxy)** на порту 8000. Зритель обращается только к нему, шлюз маршрутизирует `/api/movies`, `/api/users`, `/api/payments`, `/api/subscriptions` и `/api/events` в соответствующий домен. Пока идёт выделение сервисов, шлюз работает по паттерну Strangler Fig: фиче-флаг `GRADUAL_MIGRATION` и процент `MOVIES_MIGRATION_PERCENT` постепенно переносят трафик фильмов с монолита на Movies. В целевой схеме монолита нет.
+
+Интеграция:
+
+- синхронные запросы идут только через API Gateway;
+- изменения доменов публикуются в Kafka (`movie-events`, `user-events`, `payment-events`);
+- Events читает все три топика и обрабатывает сообщения;
+- Subscriptions читает `payment-events` и продлевает подписку без прямого вызова Payments.
+
+У каждого бизнес-домена своя база PostgreSQL. Общей базы и прямых вызовов между доменами в обход шлюза и Kafka нет.
 
 
 ## Задание 2
@@ -58,6 +79,26 @@
 
 Необходимые тесты для проверки этого API вызываются при запуске npm run test:local из папки tests/postman 
 Приложите скриншот тестов и скриншот состояния топиков Kafka http://localhost:8090 
+
+### Результат
+
+Прокси и events написаны на Node.js.
+
+- `src/microservices/proxy` — API Gateway. Пока `GRADUAL_MIGRATION=true`, доля `MOVIES_MIGRATION_PERCENT` запросов `/api/movies` уходит в movies, остальные в монолит. Если флаг выключен, фильмы уходят в movies целиком. Users, payments и subscriptions идут в монолит. Заголовок ответа `X-Upstream` показывает, какой сервис ответил.
+- `src/microservices/events` — producer и три consumer'а на топики `movie-events`, `user-events`, `payment-events`. `POST /api/events/movie|user|payment` публикует событие и возвращает `status: success`. Тот же сервис читает сообщение и пишет обработку в лог.
+- Сервис events в `docker-compose.yml` уже был описан, отдельно добавлять его не пришлось. Монолит и movies теперь стартуют после healthy Postgres.
+
+Проверка процента миграции, 20 запросов `GET /api/movies`:
+
+- `MOVIES_MIGRATION_PERCENT=0` — 20 ответов от монолита
+- `MOVIES_MIGRATION_PERCENT=100` — 20 ответов от movies-service
+- `MOVIES_MIGRATION_PERCENT=50` — 11 от movies-service и 9 от монолита
+
+`npm run test:local`: 22 запроса, 42 проверки, 0 падений.
+
+![Postman-тесты](docs/assignment-2/postman-tests.png)
+
+![Топики Kafka](docs/assignment-2/kafka-topics.png)
 
 
 ## Задание 3
@@ -274,6 +315,25 @@ cat .docker/config.json | base64
 #### Шаг 3
 Добавьте сюда скриншота вывода при вызове https://cinemaabyss.example.com/api/movies и  скриншот вывода event-service после вызова тестов.
 
+### Результат
+
+CI собирает четыре образа и пушит их в GHCR. В `.github/workflows/docker-build-push.yml` ветка `cinema` добавлена в `push`, имена репозиториев приводятся к нижнему регистру, а после monolith и movies собираются `events-service` и `proxy-service`. `api-tests.yml` тоже запускается на `cinema`: `docker compose up -d --build` ждёт health монолита, movies, events и proxy, затем Newman гоняет коллекцию в сети `cinemaabyss-network`.
+
+В Kubernetes у proxy и events есть Deployment и Service. Ingress `cinemaabyss.example.com` отправляет `/api/events` в events-service:8082, остальной трафик — в proxy-service:8000. Образы: `ghcr.io/aleksfdk/architecture-pro-cinemaabyss/{monolith,movies-service,events-service,proxy-service}:latest`.
+
+Проверка `MOVIES_MIGRATION_PERCENT` в `src/kubernetes/configmap.yaml` при `GRADUAL_MIGRATION=true`, заголовок `X-Upstream`:
+
+- `0` — все ответы `GET /api/movies` приходят от монолита
+- `100` — все ответы приходят от movies-service
+
+В configmap оставлено значение `100`. Вызов `http://cinemaabyss.example.com/api/movies` возвращает список фильмов и заголовок `x-upstream: movies-service`.
+
+`npm run test:kubernetes`: 22 запроса, 42 проверки, 0 падений. Health-check монолита, movies, events и proxy тоже зелёные: ingress и proxy доводят `/health`, `/api/movies/health` и `/api/events/health` до нужных сервисов. В логе events-service видны `produced` и `consumed` для movie, user и payment.
+
+![Список фильмов](docs/assignment-3/movies.png)
+
+![Логи events-service](docs/assignment-3/events-logs.png)
+
 
 ## Задание 4
 Для простоты дальнейшего обновления и развертывания вам как архитектуру необходимо так же реализовать helm-чарты для прокси-сервиса и проверить работу 
@@ -349,6 +409,24 @@ minikube tunnel
 https://cinemaabyss.example.com/api/movies
 и приложите скриншот развертывания helm и вывода https://cinemaabyss.example.com/api/movies
 
+### Результат
+
+Чар `src/kubernetes/helm` ставит весь стенд одной командой. В `values.yaml` образы monolith, movies, events и proxy указывают на `ghcr.io/aleksfdk/architecture-pro-cinemaabyss/...:latest`, `pullPolicy` — `IfNotPresent`, секрет `imagePullSecrets.dockerconfigjson` совпадает с `src/kubernetes/dockerconfigsecret.yaml`.
+
+Шаблоны `templates/services/proxy-service.yaml` и `templates/services/events-service.yaml` повторяют рабочие Deployment и Service. Proxy слушает 8000, Service публикует порт 80, переменные Strangler Fig берёт из ConfigMap. Events публикует и читает Kafka по `kafka:9092`. Ingress отправляет `/api/events` в events-service:8082, остальной трафик — в proxy-service:80. В ConfigMap адрес movies — `http://movies-service:8081`, добавлен `EVENTS_SERVICE_URL`.
+
+Ручная установка удалена (`kubectl delete all --all -n cinemaabyss` и namespace). Вместе с namespace ушли старые PVC, поэтому Kafka поднялась на чистых данных.
+
+```bash
+helm install cinemaabyss ./src/kubernetes/helm --namespace cinemaabyss --create-namespace
+```
+
+Релиз `cinemaabyss` в статусе `deployed`, ревизия 1. Все семь подов `1/1 Running`. `http://cinemaabyss.example.com/api/movies` возвращает список фильмов и заголовок `x-upstream: movies-service` при `MOVIES_MIGRATION_PERCENT=100`.
+
+![Helm-релиз](docs/assignment-4/helm-deploy.png)
+
+![Список фильмов после Helm](docs/assignment-4/movies.png)
+
 
 # Задание 5
 Компания планирует активно развиваться и для повышения надежности, безопасности, реализации сетевых паттернов типа Circuit Breaker и канареечного деплоя вам как архитектору необходимо развернуть istio и настроить circuit breaker для monolith и movies сервисов.
@@ -414,6 +492,23 @@ You can see 21 for the upstream_rq_pending_overflow value which means 21 calls s
 ```
 
 Приложите скриншот работы circuit breaker'а
+
+### Результат
+
+Istio 1.31.3 поставлен из локальных чартов релиза: публичный Helm-репозиторий `istio-release.storage.googleapis.com` ответил 403. В кластере работают `istio-base`, `istiod` и gateway. Namespace `cinemaabyss` помечен `istio-injection=enabled`, у monolith, movies, proxy и Fortio по два контейнера.
+
+Circuit breaker — два `DestinationRule` в `src/kubernetes/circuit-breaker-config.yaml`, для `movies-service` и `monolith`. Пул соединений: `maxConnections: 1`, `http1MaxPendingRequests: 1`, `maxRequestsPerConnection: 1`. Порты этих Service названы `http`, иначе Envoy считает 8081 обычным TCP и не применяет HTTP-лимит.
+
+Fortio, 50 потоков и 500 вызовов `http://movies-service:8081/api/movies`:
+
+- `200` — 8 (1.6%)
+- `503` — 492 (98.4%)
+- `upstream_rq_pending_overflow: 492` — столько запросов Envoy отклонил, не дожидаясь свободного слота
+- `upstream_rq_pending_total: 8` — столько запросов всё же ушло в movies
+
+Тот же лимит на монолите, 200 вызовов `http://monolith:8080/api/movies`: 2 ответа `200`, 198 ответов `503`, `upstream_rq_pending_overflow: 141`.
+
+![Circuit breaker](docs/assignment-5/circuit-breaker.png)
 
 Удаляем все
 ```bash
