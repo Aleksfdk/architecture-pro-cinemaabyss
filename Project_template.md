@@ -409,6 +409,24 @@ minikube tunnel
 https://cinemaabyss.example.com/api/movies
 и приложите скриншот развертывания helm и вывода https://cinemaabyss.example.com/api/movies
 
+### Результат
+
+Чар `src/kubernetes/helm` ставит весь стенд одной командой. В `values.yaml` образы monolith, movies, events и proxy указывают на `ghcr.io/aleksfdk/architecture-pro-cinemaabyss/...:latest`, `pullPolicy` — `IfNotPresent`, секрет `imagePullSecrets.dockerconfigjson` совпадает с `src/kubernetes/dockerconfigsecret.yaml`.
+
+Шаблоны `templates/services/proxy-service.yaml` и `templates/services/events-service.yaml` повторяют рабочие Deployment и Service. Proxy слушает 8000, Service публикует порт 80, переменные Strangler Fig берёт из ConfigMap. Events публикует и читает Kafka по `kafka:9092`. Ingress отправляет `/api/events` в events-service:8082, остальной трафик — в proxy-service:80. В ConfigMap адрес movies — `http://movies-service:8081`, добавлен `EVENTS_SERVICE_URL`.
+
+Ручная установка удалена (`kubectl delete all --all -n cinemaabyss` и namespace). Вместе с namespace ушли старые PVC, поэтому Kafka поднялась на чистых данных.
+
+```bash
+helm install cinemaabyss ./src/kubernetes/helm --namespace cinemaabyss --create-namespace
+```
+
+Релиз `cinemaabyss` в статусе `deployed`, ревизия 1. Все семь подов `1/1 Running`. `http://cinemaabyss.example.com/api/movies` возвращает список фильмов и заголовок `x-upstream: movies-service` при `MOVIES_MIGRATION_PERCENT=100`.
+
+![Helm-релиз](docs/assignment-4/helm-deploy.png)
+
+![Список фильмов после Helm](docs/assignment-4/movies.png)
+
 
 # Задание 5
 Компания планирует активно развиваться и для повышения надежности, безопасности, реализации сетевых паттернов типа Circuit Breaker и канареечного деплоя вам как архитектору необходимо развернуть istio и настроить circuit breaker для monolith и movies сервисов.
